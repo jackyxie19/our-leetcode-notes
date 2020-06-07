@@ -1,2 +1,2 @@
-# gitproject
- git projects in my local space
+# 笔记小仓库
+这里用于记录大家刷题的心得体会。作为笔记心得包括但不限于算法思路
