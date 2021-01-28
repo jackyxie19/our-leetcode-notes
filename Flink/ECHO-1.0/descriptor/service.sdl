@@ -1,0 +1,34 @@
+{
+  "name" : "ECHO",
+  "label" : "Echo",
+  "description" : "The echo service",
+  "version" : "1.0",
+  "runAs" : { 
+    "user" : "root",
+    "group" : "root"
+   },  
+   "roles" : [
+    {
+       "name" : "ECHO_WEBSERVER",
+       "label" : "Web Server",
+       "pluralLabel" : "Web Servers",
+       "parameters" : [
+        {
+          "name" : "port_num",
+          "label" : "Webserver port",
+          "description" : "The web server port number",
+          "required" : "true",
+          "type" : "port",
+          "default" : 8080
+        }
+      ],
+      "startRunner" : {
+         "program" : "scripts/control.sh",
+         "args" : [ "start" ],
+         "environmentVariables" : {
+           "WEBSERVER_PORT" : "${port_num}"         
+         }
+      }
+    }
+  ]
+}
