@@ -421,8 +421,538 @@ Git就是乐观锁的典型例子。当我们向远端仓库push时，git会检�
 
 换一种思路更易理解：读写锁只是一把锁，有读锁定、写锁定两种。
 
+锁的升降级：
+
+1. 支持锁的降级，不支持锁的升级。可在获取写锁时降级为读锁，读锁升级写锁会带来阻塞。（ReentrantReadWriteLockLock，避免死锁）
+
+总结：
+
+1. ReentrantReadWriteLock实现了ReadWriteLock接口，最主要的方法有两个：readLock与WriteLock
+2. 锁申请和释放策略：
+   1. 多个线程只申请读锁，都可以申请到
+   2. 有线程持有读锁时，其他线程申请写锁会等待读锁被释放
+3. 插队策略：为了防止饥饿，读锁不能插队
+4. 升降级策略：只能写锁降级为读锁，不能读锁升级成写锁（避免死锁）
+5. 使用场景：相比于ReentrantLock使用于一般场景，ReentrantReadWriteLock适用于读多写少的情况，合理使用可进一步提高并发效率。
+
 ## 自旋锁和阻塞锁
+
+### 概念：
+
+阻塞或唤醒一个Java线程需要OS切换CPU状态来完成，这种状态转换需要耗费处理器时间。
+
+如果同步代码块中的内容过于简单，状态转换消耗的时间有可能比用户代码执行时间还要常。
+
+许多场景中，同步资源的锁定时间很短，为了这一小段时间去切换线程，线程挂起和恢复现场的花费可能让系统得不偿失。
+
+如果物理机有多个处理器，能够让两个或以上的线程并行执行，我们可让后面请求锁的线程不放弃CPU的执行时间，看持有锁的线程是否很快释放锁
+
+而为了让当前线程“稍等一下”，我们需要让当前线程进行自旋。如果在自旋完成后前面锁定同步资源的线程已释放锁，那么当前线程就可以不必阻塞而是直接获取同步资源，避免线程切换的开销，这就是自旋锁。
+
+阻塞锁与自旋锁相反，阻塞锁如果遇到没拿到锁的情况，会直接把线程阻塞，直到被唤醒。
+
+### 缺点：
+
+若果锁被占用的时间过长，那么自旋线程会浪费处理器资源
+
+在自旋的过程中，一直消耗CPU。虽然自旋锁起始开销低于悲观锁，但随着时间的增加，开销线性增长。
+
+### 原理和源码分析
+
+Java5及以上版本并发包atomic下的类基本都是自旋实现。
+
+AtomicInteger的实现：自旋锁的实现原理是CAS。AtomicInteger中调用unsafe进行自增操作的源码中的do-while循环就是一个自旋操作，如果修改过程中遇到其他线程竞争导致修改失败，则在while中死循环至修改成功。
+
+### 适用场景
+
+自旋锁一般用于多核的服务器，在并发度不是特别高的情况下，比阻塞锁的效率高。
+
+另外，自旋锁适用于临界区比较短小的情况，否则如果临界区很大（线程一旦拿到锁很久才释放），那是不合适的。
 
 ## 可中断锁
 
+在Java中，synchronized就是不可中断锁，而Lock是可中断锁，因为tryLock(time)和lockInterruptibly都能响应中断。
+
+如果某一线程A正在执行锁中的代码，另一线程B正在等待获取该锁。可能由于等待时间过程，线程B不想等待而去处理其他事情。此时我们可以中断它，这种就是可中断锁。
+
 ## 锁优化
+
+### JVM对锁的优化
+
+1. 自旋锁和自适应：在长时间自旋获取不到锁后，可能直接进入阻塞状态。
+2. 锁消除：判定方法全为私有，直接清除锁
+3. 锁粗话：过程中许多方法加锁、解锁，直接将上锁范围扩大，无需反复的加锁、解锁。
+
+### 写代码时如果优化和提高并发性能
+
+1. 缩小同步代码块
+2. 尽量不要锁住方法（一般不需要锁住这么大范围）
+3. 减少锁的次数
+4. 避免人为制造“热点”
+5. 锁中尽量不要再包含锁
+6. 选择合适的锁类型或合适的工具类
+
+
+
+# 原子类
+
+## 什么是原子类，有什么用
+
+不可分割：一个操作是不可中断的，即便是多线程的情况下也可保证
+
+原子类的作用和锁类似，是为了保证线程安全。原子类优于锁的地方：
+
+1. 粒度更细：原子变量将竞争范围缩小到变量级别，是可获得的最细粒度
+2. 效率更高：通常，使用原子类效率比锁高，除了高度竞争情况
+
+## 6类原子类总览
+
+基本类型
+
+1. AtomicInteger
+2. AtomicLong
+3. AtomicBoolean
+
+数组类型
+
+1. AtomicIntegerArray
+2. AtomicLongArray
+3. AtomicReferenceArray
+
+引用类型：
+
+1. AtomicReference
+2. AtomicStampedReference
+3. AtomicMarkableReference
+
+升级类型原子类：
+
+1. AtomicIntegerFieldUpdater
+2. AtomicLongFielUpdater
+3. AtomicReferenceFieldUpdater
+
+Adder累加器：
+
+1. LongAdder
+2. DoubleAdder
+
+Accumulator累加器：
+
+1. LongAccumulator
+2. DoubleAccumulator
+
+## Atomic*基本类型原子类（AtomicInteger）
+
+### 常用方法
+
+1. get()
+
+2. getAndSet
+
+3. getAndIncrement
+4. getAndDecrement
+5. getAndAdd
+6. compareAndSet():
+
+## Atomic*数组
+
+## Atomic*Reference引用类型原子类
+
+## 普通变量升级为原子类
+
+## Adder累加器
+
+是java8引入的，相对较新
+
+高并发下LongAdder比AtomicLong效率高，不过本质上是空间换时间
+
+竞争激烈的时候，LongAdder把不同线程对应到不同的Cell上进行修改，降低了冲突的概率，是多端锁的理念，提高了并发性。
+
+## Accumulator累加器
+
+Accumulator与Adder相似，但更为通用
+
+
+
+# CAS
+
+## 什么是CAS
+
+主要用于并发编程领域
+
+我认为V的值应该是A，如果是的话我把他改成B。如果不是A说明被别人修改了，那么我就不修改。避免并发修改导致的错误。
+
+CAS有三个操作数：内存值V，预期值A，要修改的值B。
+
+CAS要利用CPU的特殊指令
+
+```java
+//CAS 等价语义
+class SimulatedCAS{
+    private volatile int value;
+    public synchronized int compareAndSwap(int expectedValue, int newValue){
+        int oldValue = value;
+        if(oldValue==expectedValue){
+            value = newValue;
+        }
+        return oldValue;
+    }
+}
+
+class TowThreadCopetition implements Runnable{
+    
+    public void run(){
+        compareAndSwap(0,1);
+    }
+}
+```
+
+## 应用场景
+
+1. 乐观锁：数据库版本号
+2. 并发容器：ConcurrentHashMap
+
+
+
+### 如何利用CAS实现原子操作
+
+1. AtomicInteger加载Unsafe工具，用来直接操作内存数据
+2. 用Unsafe来实现底层操作
+3. 用volatile修饰value字段，保障可见性。  
+
+### Unsafe类
+
+1. Unsafe是CAS的核心类。Java无法直接访问底层操作系统，而是通过native方法来访问。不过JVM可通过Unsafe类，其提供了硬件级别的原子操作
+2. valueOffset表示的是变量值在内存中的偏移地址。Unsafe类通过内存偏移地址直接操作内存数据。
+
+## CAS缺点
+
+1. ABA问题：引入版本号
+2. 自旋时间过长
+
+# Final关键字和不变性
+
+## 什么是不变性Immutable
+
+1. 如果对象在被创建后，状态不能被修改，那么其为不可变。引用及内容均不变。
+2. 具有不变性的对象一定是线程安全的（只读）。
+
+## Final的作用
+
+1. 类防止被继承、方法防止被重写、变量防止被修改。
+2. 天生是线程安全的，不需要额外的同步开销
+
+## 三种用法：类、变量、方法
+
+### 修饰变量：
+
+含义：被final修饰的变量，意味着值不能被修改。如果变量是对象，那么对象的引用不能变，但是对象自身的内容仍然可变。
+
+三种变量：
+
+1. final instance variable 类中final属性
+2. final static variable 类中static final属性
+3. final local variable 方法中的final属性
+
+final修饰变量：赋值时机
+
+类中final属性：
+
+1. 声明变量时，等号右边赋值
+2. 构造函数中赋值
+3. 类初始化代码块中赋值
+4. 若不采用1赋值，必须在2、3中选一方式赋值，这是final语法规定
+
+类中final static 属性：
+
+1. 声明时赋值
+2. 静态代码块赋值
+
+方法中的final属性（local variable）：
+
+1. 不规定赋值时机，只要求在使用前被赋值。
+
+### 修饰方法
+
+不允许final修饰构造方法。
+
+final修饰方法不可被重写。
+
+引申：static方法不可被重写。但子类可声明重名的static方法。
+
+### 修饰类
+
+final修饰类不可被继承。如String类就是被final修饰的。
+
+## 注意点
+
+final修饰对象时，只是引用不可变，内容可变
+
+在知道对象创建后不修改，养成良好的编程习惯
+
+
+
+## 不变性与final关系
+
+简单实用final不意味着不可变：
+
+1. 对于基本数据类型，final修饰后就具有不可变性
+2. 对于对象（引用）类型，需要该对象保证自身被创建后，状态永远不可变才行
+
+如何利用final实现对象不可变：
+
+1. 把所有属性都声明为final？
+
+   若属性为引用类型，仍然内容可变。
+
+满足以下条件，对象才是不可变
+
+1. 对象创建后其状态就不能修改
+2. 所有属性都是final修饰的
+3. 对象创建过程中没有发生溢出
+
+把变量写在线程内部--栈封闭：在方法里新建的局部变量，实际上是存储在每个线程私有的栈空间。而每个栈的空间不能被其他线程所访问，故不会有线程安全问题。
+
+
+
+# 并发容器
+
+## 并发容器概览
+
+ConcurrentHashMap：线程安全的HashMap
+
+CopyOnWriteArrayList：线程安全的List
+
+BlockingQueue：接口，表示阻塞队列，适合用于数据共享通道
+
+ConcurrentLinkedQueue：高效的非阻塞并发队列，使用链表实现。可以看做一个线程安全的LinkedList。
+
+ConcurrentSkipListMap：是一个Map，使用跳表进行查找
+
+## 集合类的历史
+
+Vector和Hashtable是JDK早期部分，最大的缺点是性能不好。synchronized修饰在方法上，并发性能差。
+
+HashMap与ArrayList利用Collections.synchronizedList()、Collections.synchronizedMap()转为线程安全。同步代码块中加入mutex锁。
+
+## ConcurrentHashMap
+
+### Map简介
+
+HashMap
+
+Hashtable
+
+LinkedHashMap
+
+TreeMap
+
+### Why ConcurrentHashMap？
+
+Collections.synchronizedMap()并发并能差
+
+HashMap不安全：
+
+1. 同时put在hash值相同时导致数据丢失
+2. 同时扩容时导致死循环造成的CPU100%占用
+
+### HashMap分析
+
+1. 非线程安全
+2. 迭代时不允许修改内容
+3. 只读的并发是安全的
+4. 如果一定要把HashMap用在 并发环境，用Collections.synchronizedMap()
+
+
+
+### 1.7ConcurrentHashMap实现
+
+1. 最外层是多个segment，每个segment的底层数据结构与HashMap类似，仍然是数组和链表组成的拉链法
+2. 每个segment独立持有ReentrantLock锁，segment间不相互影响，提升并发效率
+3. 默认16个Segments，最多支持16个小城并发写。默认值可在初始化时修改，初始化后不可修改。
+
+### 1.8ConcurrentHashMap实现
+
+1.8将1.7ConcurrentHashMap完全重写，不采用Segments改用Node，使用synchronized与CAS共同保证并发安全。
+
+putVal：
+
+1. 判断 key value 不为空
+2. 计算hash值
+3. 根据对应位置节点的类型来赋值、helpTransfer、增长链表或给红黑树增加节点
+4. 达到阈值则“红黑树化”
+5. 返回oldVal
+
+get：
+
+1. 计算hash值
+2. 找到对应位置根据情况进行
+   1. 直接取值
+   2. 红黑树取值
+   3. 链表取值
+3. 返回结果
+
+红黑树：
+
+1. 每个节点要么是红色要么是黑色，但根节点永远是黑色
+2. 红色节点不能连续（红色节点的孩子和父亲都不能是红色）
+3. 从任一节点到其子树中每个叶子结点的路径都包含相同数量的黑色节点
+4. 所有叶节点都是黑色的
+
+### 对比1.7与1.8ConcurrentHashMap
+
+数据结构：1.7采用segment；1.8采用node+红黑树。并发度从16改为n。
+
+hash碰撞：1.7采用拉链法；1.8达到条件时使用红黑树。
+
+保证并发安全：1.7在segment中上ReentrantLock；1.8使用CAS与synchronized结合。
+
+查询复杂度：红黑树改为log(n)。
+
+为什么超过8转为红黑树：红黑树占用空间约为链表两倍，通过泊松分布得出hash碰撞达到8时概率极低（千万分之几），权衡时间与空间设置红黑树阈值为8。
+
+### 组合操作：ConcurrentHashMap也不是线程安全的
+
+### 实际生产案例
+
+
+
+## CopyOnWriteArrayList
+
+### 诞生的历史和原因
+
+java5中提出了CopyOnWriteArrayList，用以代替Vector和SynchronizedList。
+
+Vector和SynchronizedList锁粒度过大，并发效率低，迭代时无法编辑。
+
+Copy-on-Write并发容器还包括CopyOnWriteArraySet，用于替代同步Set。
+
+### 适用场景
+
+1. 读操作尽可能快，而写操作慢一些没有太大关系
+2. 读多写少：黑名单、每日更新；监听器：迭代操作远多于修改操作
+
+### 读写规则
+
+读写锁：RR共享，RW、WW、WR互斥。
+
+读写锁规则的升级：读取完全不需要加锁，写入时也不会阻塞读取。只有写入与写入间需要同步等待。
+
+### 实现原理
+
+创建新副本，读写分离
+
+迭代期间数据可能是过期的
+
+### 缺点
+
+数据一致性问题：CopyOnWrite容器只能保证数据的最终一致性，不能保证数据的实时一致性。如果希望写入数据马上被读取到则不要使用CopyOnWrite容器。
+
+内存占用问题：CopyOnWrite写操作是复制机制，写过程内存中同时驻扎两个对象。
+
+### 源码分析
+
+
+
+## 并发队列（阻塞队列、非阻塞队列）
+
+并发队列不仅仅是阻塞队列，但阻塞队列最为总要
+
+### 为什么要使用队列
+
+用队列可以在线程间传递数据：生产者消费者模式、银行转账
+
+考虑锁等线程安全问题的重任从“你”转移到了“队列”
+
+### 并发队列简介
+
+Queue
+
+BlockingQueue
+
+
+### 并发队列关系图
+
+```mermaid
+classDiagram
+Interface Queue
+Queue <|.. ConcurrentLinkedQueue
+Queue <|-- BlockingQueue
+Queue <|.. SynchronousQueue
+BlockingQueue <.. SynchronousQueue
+Queue <|.. ArrayBlockingQueue
+BlockingQueue <|.. ArrayBlockingQueue
+Queue <|.. PriorityBlockingQueue
+BlockingQueue <|.. PriorityBlockingQueue
+Queue <|.. LinkedBlockingQueue
+BlockingQueue <|.. LinkedBlockingQueue
+
+```
+
+### 阻塞队列 Blocking Queue
+
+阻塞队列是具有阻塞功能的队列，首先是一个队列，其次有阻塞功能。
+
+通常阻塞队列的一段是给生产者放数据用，另一端给消费者拿数据用。阻塞队列是线程安全的，生产者和消费者都可以是多线程。
+
+take()，put()：出错时阻塞
+
+add，remove，element出错时不阻塞直接抛出异常
+
+offer，poll，peek出错时返回false/null
+
+阻塞队列可有界可无界
+
+阻塞队列与线程池关系：阻塞队列是线程池的重要组成部分
+
+### 非阻塞队列
+
+### 如何选择适合自己的队列
+
+
+
+## 并发容器总结
+
+
+
+# 线程协作、控制并发流程
+
+## 什么是控制并发流程
+
+控制并发流程的工具类，作用就是帮助程序员更容易让线程之间合作
+
+让线程之间相互配合，来满足业务逻辑
+
+比如让线程A等待线程B执行完毕后再执行等合作策略
+
+![image-20210210092431596](JUC.assets/image-20210210092431596.png)
+
+## CountDownLatch倒计时门闩
+
+CountDownLatch作用：并发流程控制的工具
+
+1. 倒数门闩：购物拼团；大巴人满发车。倒数结束前一直处于等待状态，倒计时结束后才继续工作。
+
+主要方法：
+
+1. CountDownLatch(int count)：仅有一个构造方法，count为需要倒数的数值
+2. await()：调用await方法的线程会被挂起，知道count为0才继续执行
+3. countDown()：将count减一，直至为0
+
+![image-20210210092929857](JUC.assets/image-20210210092929857.png)
+
+两个主要的用法：
+
+1. 一个等待多个完成
+2. 多个等待一个完成
+
+CountDownLatch不能回滚重置，想重置需要新建实例
+
+## Semaphore信号量
+
+## Condition接口（又称条件对象）
+
+## CyclicBarrier循环栅栏
+
+
+
