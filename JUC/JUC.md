@@ -952,7 +952,157 @@ CountDownLatch不能回滚重置，想重置需要新建实例
 
 ## Condition接口（又称条件对象）
 
+当线程1需要等待某个条件时，他执行condition.await()，进入阻塞状态
+
+另有一个线程去执行对应条件，直到条件达成，执行condition.signal()。此时，JVM从阻塞的线程中找到那些等待该condition的线程，从其中唤醒等待时间最长的线程
+
 ## CyclicBarrier循环栅栏
 
 
 
+# AQS Abstract Queue Synchronizer
+
+## 学习AQS思路
+
+## Why AQS
+
+锁和协作类共同点：闸门。ReentrantLock和Semaphore，CountDownLatch、ReentranReadWriteLock等都有同步功能。可将共同功能提取出作为工具类，ReentrantLock和Semaphore等只用关注自身的逻辑即可。
+
+Semaphore与AQS关系：Semaphore内部有一个Syn类，Syn继承自AQS
+
+如果没有AQS:
+
+1. 需要每个协作工具自己实现同步状态的原子性管理、线程的阻塞与解除阻塞、队列的管理
+2. 在并发场景下，自己正确且高效实现这些内容是有难度的。所以我们用AQS来帮我们完成这些脏活累活，只关注业务逻辑即可。
+
+## AQS作用
+
+## AQS重要性、地位
+
+## AQS内部原理解析
+
+最核心的三部分：state、FIFO队列、获取/释放时机
+
+## State状态
+
+state状态的具体含义在不同的实现类中有所不同。
+
+1. 在Semaphore中表示“剩余的许可证数量”；
+2. 在CountDownLatch中表示“还需要倒数的数量”；
+3. 在ReentrantLock中表示锁的占有情况，包括可重入计数。当state值为0时，标志该lock不被任何线程占有。
+
+state是volatile修饰的，会被并发地修改。所以所有修改state的方法都需要保证线程安全，比如getState、setState以及compareAndSetState等。这些方法都依赖于j.u.c.atomic包的支持。
+
+## 控制线程抢锁和配合的FIFO队列
+
+这个队列用来存放“等待的线程”，AQS就是“排队管理器”。当多个线程争用同一把锁时，必须有排队机制将没能拿到锁的线程串起来。当锁释放时，锁管理器就会挑一个最合适的线程来占有刚释放的锁。
+
+AQS会维护一个等待的线程队列，把等待线程都放置与该队列中。
+
+## 期望协作工具类去实现的获取、释放方法
+
+### 获取方法
+
+获取操作会依赖state变量，经常会阻塞（比如获取不到锁时）
+
+在Semaphore中，获取就是acquire()方法，作用是获取一个许可证
+
+在CountDownLatch中，获取是await()方法，作用是“等待，直到倒数结束”
+
+### 释放方法
+
+释放操作不会阻塞
+
+在Semaphore中，释放是release方法，作用是释放一个许可证
+
+CountDownLatch中，释放是countDown方法，作用是“倒数一个数”
+
+### 需要重写tryAcquire、tryRelease、tryAcquireShared方法
+
+
+
+## 源码解析
+
+### AQS用法
+
+1. 写一个类，想好协作逻辑，实现获取与释放方法。
+2. 内部写一个Sync类继承AbstractQueuedSynchronizer
+3. 根据是否独占来重写tryAcquire、tryRelease、tryAcquireShared等方法。在定义的获取与释放方法中调用AQS的acquire、release等方法。
+
+### CountDownLatch中AQS用法
+
+构造方法：传入count，将count赋值于内部AQS的state变量
+
+getCount：调用内部AQS.getCount()，返回AQS中的state
+
+await：等待直到结束，内部调用AQS.acquireSharedInterruptibly
+
+### AQS在信号量中的应用
+
+在Semaphore中，state表示许可证的剩余数量
+
+tryAcquire方法中，判断nonfairTryAcquireShared大于等于0的话，代表成功
+
+这里会先检查剩余许可证数量够不够这次需要的，用减法来计算，如果直接不够就返回负数表示失败。够则使用自旋加compareAndSetState来改变state状态，直到成功返回整数；期间被其他人修改导致剩余量不够也返回负数代表获取失败。
+
+### AQS在ReentrantLock中的应用
+
+由于锁是可重入的，所以state代表重入次数。每次释放锁先判断是不是当前持有锁的线程释放的，如果不是就抛出异常；如果是则重复次数减一，当重入次数减到0说明完全释放了，于是free标志位置为true，且state置为0。
+
+## 利用AQS自定义Latch门闩
+
+
+
+# Future和Callable--治理线程第二大法宝
+
+## Runnable的缺陷
+
+Runnable的run方法返回值为void
+
+Runnable的run方法不能抛出异常
+
+## Callable接口
+
+类似于Runnable接口，重写其call方法。
+
+我们可以通过Future.get来获取Callable接口返回的执行结果。还可以通过Future.isDone来判断任务是否已经执行完成，还可以取消该任务，限时获取任务结果等
+
+在call未执行完毕之前，调用get的线程会被阻塞，直到call方法反悔了结果后，此时future.get才能得到该结果，然后主线程才会切换到runnable状态
+
+future是一个存储器，它存储了call这个任务的结构。而这个任务的执行时间时无法提前确定的，因为这完全取决于call方法执行的情况
+
+## Future类
+
+### 主要方法
+
+1. get：获取结果。执行效果取决于Callable任务的状态
+   1. 任务正常完成：get方法立刻返回结果
+   2. 任务尚未完成（任务还没开始或正在进行中）：get将阻塞并直到任务完成
+   3. 任务执行过程中抛出Exception：get方法会抛出ExecutionException：这里抛出的是call执行时产生的那个异常，异常类型为java.util.concurrent.ExecutionException。不论call执行时抛出异常类型，最终get抛出的异常均为ExecutionException。
+   4. 任务被取消：get方法会抛出CancellationException。
+   5. 任务超时：get方法有一个重载方法，是传入一个延迟事件的，如果时间到还未获取到结果，get会抛出TimeoutException。
+2. cancel
+3. isDone：判断线程是否执行完毕，不一定是成功完毕
+4. isCanceled
+
+### 用法1：线程池的submit方法返回Future对象，6个代码演示
+
+我们给线程池提交任务后，线程池会立刻返回一个空的Future。
+
+### 用法2：用FutureTask来创建Future
+
+FutureTask既可以作为Runnable被线程执行，又可以作为Future得到的Callable返回值
+
+把Callable实例刀座参数，生成FutureTask的帝乡，然后把这个对象当做一个Runnable对象，用线程池或另起线程去执行这个Runnable对象，最后通过FUtureTask获取刚才执行的结果。
+
+### Future的注意点
+
+Future的生命周期不可回退：生命周期只能前进，不能后退。就和线程的生命周期一样，一旦完成了任务，就永远停留在“已完成”的状态，不能重头再来。
+
+# 实战项目：高性能缓存
+
+## 最简单缓存：HashMap
+
+多线程情况下，HashMap不安全
+
+属性声明为final，增加安全性
