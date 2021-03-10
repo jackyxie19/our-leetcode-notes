@@ -458,6 +458,16 @@ AFTER MATCH SKIP子句四种匹配后策略：
 
 编写MATCH_RECOGNIZE时，内存消耗是一个重要考虑因素。
 
+
+
+## SQL
+
+TableResult.collect()与TableResult.print()的行为在不同的checkpoint模式下略有不同：
+
+- 对于批作业或没有配置任何checkpointing的流作业，TableResult.collect()与TableResult.print()既不保证精准一次的数据交付、也不保证至少一次的数据交付。查询结果产生后即可被客户端访问，作业失败重启时报错。
+- 对于配置了精准一次checkpointing流作业，TableResult.collect()与TableResult.print()保证端到端精确一次的数据交付。一条结果数据只有在其checkpointing完成后才能在客户端访问。
+- 对于配置了至少一次checkpointing流作业，TableResult.collect()与TableResult.print()保证端到端至少一次数据交付。查询结果在生成时即可访问，但同一结果可能多次发送给客户端。
+
 # 时间、定时器和窗口
 
 #### WindowOperator
@@ -727,3 +737,193 @@ pulic interface KeyedStateStore{
 ## KeyedStateBackend
 
 ## SnapshotStrategy
+
+
+
+# 端到端精准一次
+
+Flink1.4时提出了一个流式处理里程碑式的概念：`TwoPhaseCommitSinkFunction`抽离出两阶段提交的公共逻辑，使得创建从源到输出端到端精准一次应用成为可能。它提供了层级抽象，只需要用户实现少量方法即可达成精准一次语义。
+
+本文介绍内容：
+
+- 保障精准一次语义中检查点的作用
+- 展示两阶段提交协议实现的精准一次语义下，flink如何与data source及data sink交互
+- 简单示例演示`TwoPhaseCommitSinkFunction`如何实现精准一次语义
+
+## 应用中的精准一次
+
+我们说的精准一次语义是指每个输入事件只会影响最终结果一次，即使是发生故障也不会有事件重复或遗漏。Flink的checkpoint是实现精准一次语义的核心。
+
+开始前，先简单介绍下checkpoint算法的核心：
+
+checkpoint是当前状态及输入流位置的连续快照。Flink按照固定、可配置间隔生成检查点，并将其写入持久存储中（如HDFS、S3）。checkpoint写入是以异步方式，不会阻塞应用。
+
+在应用失败重启时，Flink会从最近一次检查点处恢复。Flink在应用恢复运行前，将应用状态恢复并将输入流位置回滚至检查点保存处。如同失败没有发生过。
+
+1.4之前只保证应用内的精准一次语义，并不保证与外部系统间交互的精准一次。
+
+为了提供含外部系统的端到端精准一次语义，写入外部系统的内容需要被存入flink状态中，且外部系统需提供commit及rollbacks的功能。
+
+通常使用两阶段提交协议实现分布式系统中的协同commit及rollbacks。Flink通过`TwoPhaseCommitSinkFunction`实现端到端的精准一次语义。
+
+
+
+## Flink的端到端精准一次
+
+我们通过一个Kafka应用来看Flink如何通过两阶段提交协议实现端到端的精准一次语义。Kafka是Flink经常合作使用的消息系统，在0.11版本时提供了对事务支持。这意味着Flink可以在与Kafka结合的应用中实现精准一次语义。
+
+但Flink可提供端到端精准一次语义的场景不只Kafka，可以在任何source/sink环境下提供端到端精准一次语义。其他source/sink可通过`TwoPhaseCommitFunction`实现端到端精准一次语义。
+
+<img src="Flink.assets/eo-post-graphic-1.png" alt="A sample Flink application" style="zoom: 33%;" />
+
+在data sink中实现精准一次，需要在一个事务范围内将所有数据写入kafka。一次commit包裹两次checkpoint间所有的内容。这可确保失败时写入的正确回滚。
+
+但是，在分布式系统中，持续运行的有多个sink操作时，一次commit或rollback不足以实现精准一次。因为所有的组件必须同时被commit或rollback。Flink使用两次提交协议及预提交阶段来处理此问题。
+
+checkpoint的开始标志着两阶段提交协议中的预提交阶段。在checkpoint开始时，JobManager向data stream中注入一个checkpoint barrier，该栅栏将当前批次checkpoint数据与下一批次checkpoint数据区分开。栅栏在operator间传递，每当operator收到栅栏时，会触发该operator的state backend快照操作。
+
+<img src="https://flink.apache.org/img/blog/eo-post-graphic-2.png" alt="A sample Flink application - precommit" style="zoom:33%;" />
+
+数据源存储Kafka的偏移量，在存储完成后将检查点栅栏传递给下一个operator。存储偏移量仅在operator有内部state时有效。内部状态由Flink StateBackend管理。仅有内部状态的进程中，在state中数据被checkpoint前无需做任何其他操作。Flink会负责写入信息检查点设置及失败清除操作。
+
+![A sample Flink application - precommit without external state](https://flink.apache.org/img/blog/eo-post-graphic-3.png)
+
+在进程有外部状态时，状态的处理略有不同。外部状态通常是写入外部系统方式存在，如写入Kafka。在写入外部的情况下，需要外部系统支持集成两阶段提交协议的事务功能，以实现精准一次语义。
+
+![A sample Flink application - precommit with external state](https://flink.apache.org/img/blog/eo-post-graphic-4.png)
+
+预提交阶段在检查点栅栏通过所有operator且快照回调完成时结束。此时检查点设置成功，包含了整个应用内连续的状态，包括预提交阶段的外部状态。失败情况下，从检查点重新开始。
+
+接下来便通知所有operator检查点设置成功。现在进入两阶段提交协议的提交阶段，JobManager负责确认应用中每个operator的回调。data source和window operator没有外部状态，在此阶段无需任何操作。data sink需要将外部输出的事务提交。
+
+![A sample Flink application - commit external state](Flink.assets/eo-post-graphic-5.png)
+
+- 一旦所有的operator完成了预提交，将会执行提交操作
+- 如果有一个预提交操作失败，其他所有预提交被丢弃，并回滚到上一次成功检查点处
+- 在预提交结束后，需要确保内部operator及外部系统最终提交成功。如果提交失败（如网络错误），整个Flink应用进入失败状态，并依照设定策略重启尝试另一次提交操作。此阶段非常重要，如果不保障提交阶段最终成功，将会导致数据丢失。
+
+因此，我们可以肯定所有的operator在检查点上保持一致性：数据要么提交成功，要么被丢弃回滚。
+
+## Flink实现两阶段提交操作
+
+完全实现两阶段提交协议有点复杂，Flink将公共的逻辑抽离放入抽象类`TwoPhaseCommitSinkFunction`中。
+
+扩展`TwoPhaseCommitSinkFunction`需要实现四个方法以提供精准一次：
+
+- `beginTransaction`：事务开始前，在目标文件系统临时目录下创建一个临时文件。在过程中将数据写入该临时文件
+- `preCommit`：预提交阶段，我们刷新并关闭文件，之后不再操作该文件。同时可以进入下一检查点事务的预提交阶段。
+- `commit`：提交阶段，将预提交阶段的文件移动到真实存放路径。注意这会增大输出数据的延迟。
+- `abort`：丢弃临时文件
+
+如我们所知，Flink在遇到失败时会回滚到最近一次成功检查点处。如果在预提交结束，提交成功前失败，则会回滚到预提交结束时的状态。
+
+## Wrapping Up
+
+- flink的checkpoint为两阶段提交协议及端到端精准一次语义提供基础
+- flink并不将每一步的计算结果都写入磁盘
+- flink提供的`TwoPhaseCommitSinkFunction`提取了两阶段提交协议的公共逻辑，使得flink可以去其他外部系统交互时提供端到端的精准一次语义。
+- kafka提供的事务功能在`TwoPhaseCommitSinkFunction`上层实现
+
+
+
+# Checkpoint
+
+Flink使用checkpoint及savepoint来保障状态的容错性。
+
+Flink容错机制最核心的部分是保存分布式数据流及算子状态的快照。快照是可用于恢复的连续的检查点。
+
+## Barrier
+
+Flink分布式快照的一个核心概念是Barrier。这些barriers被注入数据流并随着数据一同流动，barrier在数据流中的位置不会改变。一个barrier将数据流分为一个个数据段，每个段中的数据隶属于一个快照。每个barrier携带着前一个快照的id。barrier并不中断数据流，因此很轻量级。同一数据流中可能存在多个barrier，意味着多个快照可在同时进行（流水线）。
+
+![Checkpoint barriers in data streams](Flink.assets/stream_barriers.svg)
+
+
+
+
+
+![Aligning data streams at operators with multiple inputs](Flink.assets/stream_aligning.svg)
+
+接收多个输入源的operator需要在接收处对齐barrier。
+
+
+
+## Snapshotting Operator State
+
+当operator含有state时，state也需要执行快照。在收到barrier时对state进行快照操作。因为state快照可能很大，因此将其存于一个可配置的state backend中，默认在JobManager的内存中，生产环境可配置可靠存储如HDFS。
+
+![Illustration of the Checkpointing Mechanism](Flink.assets/checkpointing.svg)
+
+
+
+# Savepoint
+
+所有开启checkpoint的应用都可从savepoint中恢复。savepoint允许更新应用程序及Flink集群时不丢失任何状态。
+
+savepoint是手动触发的checkpoint，将程序快照写入state backent。savepoint依赖于checkpoint机制实现。
+
+savepoint和checkpoint的主要区别是由用户触发，不会自动失效。
+
+savepoint是依据checkpoint机制创建的流作业执行状态一致性镜像。可使用savepoint进行flink作业的停止与重启、fork或更新。
+
+Savepoint由两部分组成：
+
+1. 稳定存储（如HDFS、S3）上的二进制文件目录：稳定存储上的文件表示作业执行状态的数据镜像。
+2. 元数据文件：元数据文件上有指向稳定存储文件的指针。
+
+checkpoint的主要目的是为了意外失败的作业提供恢复。其生命周期由Flink管理，无需用户参与。作为恢复与定期触发的作业，checkpoint要求尽可能小、尽可能快。相反，Savepoint由用户创建、拥有和删除。多为有计划的备份恢复，如升级等。且Savepoint在作业停止后还存在。概念上讲，Savepoint的创建、恢复成本更高，更关注作业移植性及作业更改的支持。
+
+
+
+# StateBackend
+
+在启动checkpoint机制时，为防止数据丢失、保障恢复时的一致性，状态会随着checkpoint一同持久化。状态内部的存储格式、何时何地持久化取决于选用的StateBackend。
+
+## Flink内置三种StateBackend：
+
+默认使用MemoryStateBackend
+
+- MemoryStateBackend：
+- FsStateBackend：
+- RocksStateBackend：
+
+
+
+### MemoryStateBackend
+
+在MemoryStateBackend内，数据以java对象的形式存储在堆中。kv类型的状态及window operator持有存储数据、触发器的哈希表。
+
+在checkpoint时，StateBackend对状态进行快照，并将快照信息作为Checkpoint响应的一部分发送给JobManager（master）。JobManager在收到快照信息时将其存入堆内存中。
+
+MemoryStateBackend支持异步快照，默认使用异步快照。推荐使用异步快照，减少数据流阻塞。
+
+MemoryStateBackend的限制：
+
+- 默认情况下，每个独立状态大小限制为5MB。在MemoryStateBackend构造器中可增加其大小。
+- 无论配置的最大状态内存多少，都不能大于akka frame的大小。
+- 聚合后的状态必须能够放入JobManager内存中。
+
+MemoryStateBackend适用场景：
+
+- 本地开发和调试
+- 状态很小的job
+
+
+
+### FsStateBackend
+
+FsStateBackend需要配置一个文件系统的URL，如“hdfs://namenode:40010/flink/checkpoints”。
+
+FsStateBackend将正在运行的状态数据保存在TaskManager内存中。Checkpoint时，将状态快照写入配置的文件系统中。少量的元数据信息存储在JobManager内存中。
+
+FsStateBackend默认使用异步快照方式防止写状态时对数据处理造成的阻塞。
+
+
+
+# backpressure
+
+反压通常产生于这样的场景：短时负载高峰导致系统接收数据的速率远高于它处理数据的速率。许多日常问题都会导致反压，例如，垃圾回收停顿可能会导致流入的数据快速堆积，或者遇到大促或秒杀活动导致流量陡增。反压如果不能得到正确的处理，可能会导致资源耗尽甚至系统崩溃。
+
+Flink 没有使用任何复杂的机制来解决反压问题，因为根本不需要那样的方案！它利用自身作为纯数据流引擎的优势来优雅地响应反压问题。
+
+Flink 在运行时主要由 **operators** 和 **streams**  两大组件构成。每个 operator 会消费中间态的流，并在流上进行转换，然后生成新的流。对于 Flink  的网络机制一种形象的类比是，Flink 使用了高效有界的分布式阻塞队列，就像 Java  通用的阻塞队列（BlockingQueue）一样。还记得经典的线程间通信案例：生产者消费者模型吗？使用 BlockingQueue  的话，一个较慢的接受者会降低发送者的发送速率，因为一旦队列满了（有界队列）发送者会被阻塞。Flink 解决反压的方案就是这种感觉。
