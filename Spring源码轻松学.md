@@ -407,3 +407,61 @@ Spring框架有多种作用域：
 - 不要太在意版本问题，核心思想IOC、AOP不会改变
 - 覆盖所有细节是不可能的
 - 抓住骨架进行学习
+
+
+
+主干骨架：
+
+- 解析配置
+- 定位与注册对象
+- 注入对象
+
+
+
+## Bean
+
+全局掌握核心接口和类
+
+解决了关键的问题：将对象之间关系转而用配置来管理
+
+- 依赖注入：依赖关系在Spring的IoC容器中管理
+- 通过把对象包装在Bean中以达到管理对象和进行额外操作的目的
+
+
+
+Bean是Spring的一等公民
+
+- Bean的本质就是Java对象，Spring并没有通过特定接口或父类来限制它，只是这个对象的生命周期由容器来管理
+- 不需要为了创建Bean而在原来Java类上添加任何额外的限制。体现了Spring的低侵入甚至无侵入
+- 对java对象的控制体现在配置上（配置文件/注解）
+
+
+
+根据配置，生成用来描述Bean的BeanDefinition，常见属性：
+
+- 作用范围scope(@scope)：singleton、prototype、request、session、globalsession
+- 懒加载lazy-init(@Lazy)：就定Bean实例是否延时加载
+- 首选primary(@Primary)：设置为true的bean会是优先的实现类
+- factory-bean和factory-method(@Configuration和@Bean)：factory-bean表示工厂类的名称、factory-method表示工厂方法的名称
+
+
+
+容器初始化主要脉络：
+
+<img src="Spring%E6%BA%90%E7%A0%81%E8%BD%BB%E6%9D%BE%E5%AD%A6.assets/image-20210311194813914.png" alt="image-20210311194813914" style="zoom:60%;" />
+
+1. 将XML、注解等配置信息读取到内存中
+2. 在内存中配置以Resource对象存储
+3. 将Resource对象解析成BeanDefinition实例
+4. 最后将实例注册到容器中
+
+对应自研框架中`解析配置`、`定位与注册对象`
+
+![image-20210311195056943](Spring%E6%BA%90%E7%A0%81%E8%BD%BB%E6%9D%BE%E5%AD%A6.assets/image-20210311195056943.png)
+
+Spring中Bean的继承关系不是通过extend、implements实现的。而是通过设置`parent`属性完成的。
+
+一般情况下，Spring中的Bean标签会被解析成RootBeanDefinition。Spring2.5后使用GenericBeanDefinition将RootBeanDefinition和ChildBeanDefinition取代，因历史原因还有使用RootBeanDefinition。
+
+FactoryBean和BeanFactory：BeanFactory是SpringBean工厂的根接口，提供一些基础特性。FactoryBean本质也是Bean，但其做用是用于生成Bean。
+
